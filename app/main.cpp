@@ -17,6 +17,7 @@ using namespace std;
 #include "Common.h"
 #include "GraphNode.h"
 #include "Node.h"
+#include "Enclave.h"
 /*
  * Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
  *
@@ -61,6 +62,61 @@ using namespace std;
 #define SAFE_FREE(ptr) {if (NULL != (ptr)) {free(ptr); (ptr) = NULL;}}
 #endif
 
+void initializeCiphertexts(map<Bid, string> *pairs, vector<block> *ciphertexts)
+{
+    vector<Node *> nodes;
+    for (auto pair : (*pairs))
+    {
+        Node *node = new Node();
+        node->key = pair.first;
+        node->index = 0;
+        std::fill(node->value.begin(), node->value.end(), 0);
+        std::copy(pair.second.begin(), pair.second.end(), node->value.begin());
+        node->leftID = 0;
+        node->leftPos = -1;
+        node->rightPos = -1;
+        node->rightID = 0;
+        node->pos = 0;
+        node->isDummy = false;
+        node->height = 1; // new node is initially added at leaf
+        nodes.push_back(node);
+    }
+
+    unsigned long long blockSize = sizeof(Node);
+    unsigned long long clen_size = blockSize;
+    unsigned long long plaintext_size = (blockSize);
+
+    for (int i = 0; i < nodes.size(); i++)
+    {
+        std::array<byte_t, sizeof(Node)> data;
+
+        const byte_t *begin = reinterpret_cast<const byte_t *>(std::addressof((*nodes[i])));
+        const byte_t *end = begin + sizeof(Node);
+        std::copy(begin, end, std::begin(data));
+
+        block buffer(data.begin(), data.end());
+        (*ciphertexts).push_back(buffer);
+    }
+}
+
+void initializeEdgeList(vector<GraphNode> *edgeList, char **edges)
+{
+    unsigned long long blockSize = sizeof(GraphNode);
+    unsigned long long clen_size = blockSize;
+    unsigned long long plaintext_size = (blockSize);
+
+    for (int i = 0; i < edgeList->size(); i++)
+    {
+        std::array<byte_t, sizeof(GraphNode)> data;
+
+        const byte_t *begin = reinterpret_cast<const byte_t *>(std::addressof((*edgeList)[i]));
+        const byte_t *end = begin + sizeof(GraphNode);
+        std::copy(begin, end, std::begin(data));
+
+        block buffer(data.begin(), data.end());
+        memcpy((uint8_t *)(*edges) + i * buffer.size(), buffer.data(), buffer.size());
+    }
+}
 
 int main(int argc, char *argv[]) {
     (void) (argc);
@@ -81,7 +137,11 @@ int main(int argc, char *argv[]) {
     size = std::count(std::istreambuf_iterator<char>(inFile), std::istreambuf_iterator<char>(), '\n');
 
     std::ifstream infile((filename).c_str());
-
+    if (!infile)
+    {
+        cerr << "File not found." << endl;
+        return 1;
+    }
 
     map<Bid, string> pairs;
     vector<block> ciphertexts;
@@ -105,6 +165,8 @@ int main(int argc, char *argv[]) {
             }
             edgeList.push_back(node);
         }
+        if (i == size - 1)
+            std::cout << src << " " << dst << " " << weight << std::endl;
     }
     int encryptionSize = sizeof (GraphNode); 
     int maxPad = (int) pow(2, ceil(log2(edgeList.size())));
@@ -113,9 +175,12 @@ int main(int argc, char *argv[]) {
     int depth = (int) (ceil(log2(maxSize)) - 1) + 1;
     int maxOfRandom = (long long) (pow(2, depth));
     unsigned long long bucketCount = maxOfRandom * 2 - 1;
-    unsigned long long blockSize = sizeof (Node); // B  
+    constexpr unsigned long long blockSize = sizeof(Node); // B
     size_t blockCount = (size_t) (Z * bucketCount);
 
+    std::cout << "Node Number:" << node_numebr << std::endl;
+
+    initializeEdgeList(&edgeList, &edges);
     int edgeNumner = edgeList.size();
     edgeList.clear();
 
@@ -130,13 +195,14 @@ int main(int argc, char *argv[]) {
         pairs[inputBid] = "0-0";
     }
 
+    std::cout << "Processed omaps" << std::endl;
+    constexpr unsigned long long storeBlockSize = (size_t)Z * (size_t)(blockSize);
+    initializeCiphertexts(&pairs, &ciphertexts);
     setupMode = true;
-    unsigned long long storeBlockSize = (size_t)Z *(size_t) (blockSize);
-
     ocall_setup_ramStore(blockCount, storeBlockSize);
     ocall_nwrite_raw_ramStore(&ciphertexts);
+    std::cout << "Setup RAM store with " << blockCount << " blocks and " << storeBlockSize << " bytes" << std::endl;
     Utilities::startTimer(1);
-
     int op = -1;
     if (alg == "OBLIVIOUS-SSSP-OBLIVM") {
         op = 3;
@@ -145,11 +211,12 @@ int main(int argc, char *argv[]) {
     } else if (alg == "OBLIVIOUS-BFS") {
         op = 1;
     }
+    std::cout << "Setting up " << edgeNumner << " edges" << std::endl;
 
-   
+    ecall_setup_with_small_memory(edgeNumner, node_numebr, &edges, op);
 
     auto timer = Utilities::stopTimer(1);
-    cout << "Setup Time:" << timer << " Microseconds" << endl;
+    cout << "Setup Time:" << timer << "  Microseconds" << endl;
 
     Utilities::startTimer(5);
     if (alg == "SSSP-OBLIVM" || alg == "sssp-oblivm") {

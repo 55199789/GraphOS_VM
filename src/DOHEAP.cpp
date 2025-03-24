@@ -174,7 +174,7 @@ vector<HeapBucket> DOHEAP::ReadBuckets(vector<long long> indexes) {
     } else {
         size_t readSize;
         char* tmp = new char[indexes.size() * storeBlockSize];
-        ocall_nread_heapStore(indexes.size(), indexes.data(), tmp, indexes.size() * storeBlockSize);
+        readSize = ocall_nread_heapStore(indexes.size(), indexes.data(), tmp, indexes.size() * storeBlockSize);
         for (unsigned int i = 0; i < indexes.size(); i++) {
             block buffer(tmp + i*readSize, tmp + (i + 1) * readSize);
             HeapBucket bucket = DeserialiseBucket(buffer);
@@ -207,27 +207,43 @@ void DOHEAP::WriteBuckets(vector<long long> indexes, vector<HeapBucket> buckets)
 }
 
 void DOHEAP::EvictBuckets() {
-    unordered_map<long long, HeapBucket>::iterator it = virtualStorage.begin();
-    if (useLocalRamStore) {
+    std::cout << "useLocalRamStore: " << useLocalRamStore << std::endl;
+    if (useLocalRamStore)
+    {
         for (auto item : virtualStorage) {
             block b = SerialiseBucket(item.second);
             localStore->Write(item.first, b);
         }
-    } else {
-        for (unsigned int j = 0; j <= virtualStorage.size() / 10000; j++) {
+    }
+    else
+    {
+        unordered_map<long long, HeapBucket>::iterator it = virtualStorage.begin();
+        std::cout << "storeBlockSize: " << storeBlockSize << std::endl;
+        std::cout << "virtualStorage.size(): " << virtualStorage.size() << std::endl;
+        for (unsigned int j = 0; j <= virtualStorage.size() / 10000; j++)
+        {
+            std::cout << "j: " << j << std::endl;
             char* tmp = new char[10000 * storeBlockSize];
             vector<long long> indexes;
             size_t cipherSize = 0;
-            for (int i = 0; i < min((int) (virtualStorage.size() - j * 10000), 10000); i++) {
+            std::cout << "i ub: " << min((int)(virtualStorage.size() - j * 10000), 10000) << std::endl;
+            for (int i = 0; i < min((int)(virtualStorage.size() - j * 10000), 10000); i++)
+            {
                 block b = SerialiseBucket(it->second);
                 indexes.push_back(it->first);
                 std::memcpy(tmp + i * b.size(), b.data(), b.size());
                 cipherSize = b.size();
                 it++;
             }
-            if (min((int) (virtualStorage.size() - j * 10000), 10000) != 0) {
-                ocall_nwrite_heapStore(min((int) (virtualStorage.size() - j * 10000), 10000), indexes.data(), (const char*) tmp, cipherSize * min((int) (virtualStorage.size() - j * 10000), 10000));
+            std::cout << "ocall_nwrite_heapStore" << std::endl;
+            if (min((int)(virtualStorage.size() - j * 10000), 10000) != 0)
+            {
+                ocall_nwrite_heapStore(min((int)(virtualStorage.size() - j * 10000), 10000),
+                                       indexes.data(), (const char *)tmp,
+                                       cipherSize * min((int)(virtualStorage.size() - j * 10000),
+                                                        10000));
             }
+            std::cout << "delete tmp" << std::endl;
             delete tmp;
             indexes.clear();
         }
@@ -300,8 +316,8 @@ void DOHEAP::UpdateMin() {
     }
     if (nodesIndex.size() > 0) {
         size_t readSize;
-        char* tmp = new char[nodesIndex.size() * storeBlockSize];
-        ocall_nread_heapStore(nodesIndex.size(), nodesIndex.data(), tmp, nodesIndex.size() * storeBlockSize);
+        char *tmp = new char[nodesIndex.size() * storeBlockSize];
+        readSize = ocall_nread_heapStore(nodesIndex.size(), nodesIndex.data(), tmp, nodesIndex.size() * storeBlockSize);
         for (unsigned int i = 0; i < nodesIndex.size(); i++) {
             block buffer(tmp + i*readSize, tmp + (i + 1) * readSize);
             HeapBucket bucket;
@@ -366,8 +382,8 @@ pair<Bid,array<byte_t, 16> > DOHEAP::extractMin() {
         vector<long long> nodesIndex;
         nodesIndex.push_back(0);
         size_t readSize;
-        char* tmp = new char[nodesIndex.size() * storeBlockSize];
-        ocall_nread_heapStore(nodesIndex.size(), nodesIndex.data(), tmp, nodesIndex.size() * storeBlockSize);
+        char *tmp = new char[nodesIndex.size() * storeBlockSize];
+        readSize = ocall_nread_heapStore(nodesIndex.size(), nodesIndex.data(), tmp, nodesIndex.size() * storeBlockSize);
         block ciphertext(tmp, tmp + readSize);
         block buffer(tmp, tmp + readSize);
         curBlock.data.assign(buffer.begin() + blockSize*Z, buffer.begin() + blockSize * (Z + 1));
@@ -413,8 +429,8 @@ array<byte_t, 16> DOHEAP::findMin() {
         vector<long long> nodesIndex;
         nodesIndex.push_back(0);
         size_t readSize;
-        char* tmp = new char[nodesIndex.size() * storeBlockSize];
-        ocall_nread_heapStore(nodesIndex.size(), nodesIndex.data(), tmp, nodesIndex.size() * storeBlockSize);
+        char *tmp = new char[nodesIndex.size() * storeBlockSize];
+        readSize = ocall_nread_heapStore(nodesIndex.size(), nodesIndex.data(), tmp, nodesIndex.size() * storeBlockSize);
         block buffer(tmp, tmp + readSize);
         curBlock.data.assign(buffer.begin() + blockSize*Z, buffer.begin() + blockSize * (Z + 1));
         delete tmp;
@@ -469,6 +485,7 @@ pair<Bid,array<byte_t, 16> > DOHEAP::execute(Bid k, array<byte_t, 16> v, int op)
     pair<Bid,array<byte_t, 16> > res;
     HeapNode* node = new HeapNode();
     node->pos = RandomPath();
+    std::cout << "Random Path: " << node->pos << std::endl;
     Bid dummyKey;
     dummyKey.setInfinity();
     bool isInsert = HeapNode::CTeq(op, 2);
@@ -481,28 +498,31 @@ pair<Bid,array<byte_t, 16> > DOHEAP::execute(Bid k, array<byte_t, 16> v, int op)
 
     array<byte_t, 16> result;
     HeapBlock curBlock;
+    std::cout << "virtualStorage.count(0): " << virtualStorage.count(0) << std::endl;
     if (virtualStorage.count(0) == 0) {
         vector<long long> nodesIndex;
         nodesIndex.push_back(0);
         size_t readSize;
-        char* tmp = new char[nodesIndex.size() * storeBlockSize];
-        ocall_nread_heapStore(nodesIndex.size(), nodesIndex.data(), tmp, nodesIndex.size() * storeBlockSize);
+        char *tmp = new char[nodesIndex.size() * storeBlockSize];
+        readSize = ocall_nread_heapStore(nodesIndex.size(), nodesIndex.data(), tmp, nodesIndex.size() * storeBlockSize);
         block buffer(tmp, tmp + readSize);
         curBlock.data.assign(buffer.begin() + blockSize*Z, buffer.begin() + blockSize * (Z + 1));
         delete tmp;
     } else {
         curBlock.data.assign(virtualStorage[0].subtree_min.data.begin(), virtualStorage[0].subtree_min.data.end());
     }
+    std::cout << "curBlock.data.size(): " << curBlock.data.size() << std::endl;
     HeapNode* rootnode = convertBlockToNode(curBlock.data);
     HeapNode* minnode = new HeapNode();
     HeapNode::conditional_assign(minnode,rootnode,true);
-    bool isInStash=false;
-    
-    for (HeapNode* node : stash.nodes) {
-        isInStash = HeapNode::CTeq(-1, Bid::CTcmp(node->key, minnode->key)) && isExtract && !node->isDummy;
-        HeapNode::conditional_assign(minnode,node,isInStash);
-    }  
-    
+    bool isInStash = false;
+    std::cout << "stash.nodes.size(): " << stash.nodes.size() << std::endl;
+    for (HeapNode *node : stash.nodes)
+    {
+        isInStash = HeapNode::CTeq(-1, Bid::CTcmp(node->key, minnode->key)) & isExtract & !node->isDummy;
+        HeapNode::conditional_assign(minnode, node, isInStash);
+    }
+    std::cout << "minnode->value.size(): " << minnode->value.size() << std::endl;
     for (int k = 0; k < minnode->value.size(); k++) {
         result[k] = minnode->value[k];
     }
@@ -510,19 +530,26 @@ pair<Bid,array<byte_t, 16> > DOHEAP::execute(Bid k, array<byte_t, 16> v, int op)
     res.first = minnode->key;
 
     currentLeaf = RandomPath() / 2;
-    currentLeaf = HeapNode::conditional_select(minnode->pos, (unsigned long long) currentLeaf, isExtract);
+    std::cout << "Current Leaf: " << currentLeaf << std::endl;
+    currentLeaf = HeapNode::conditional_select(minnode->pos, (unsigned long long)currentLeaf, isExtract);
+    std::cout << "Current Leaf: " << currentLeaf << std::endl;
 
     FetchPath(currentLeaf);
-    for (HeapNode* node : stash.nodes) {
-        bool choice = HeapNode::CTeq(0, Bid::CTcmp(node->key, minnode->key)) && isExtract && HeapNode::CTeq(0, Bid::CTcmp(node->value, minnode->value));
+    std::cout << "stash.nodes.size(): " << stash.nodes.size() << std::endl;
+    for (HeapNode *node : stash.nodes)
+    {
+        bool choice = HeapNode::CTeq(0, Bid::CTcmp(node->key, minnode->key)) & isExtract & HeapNode::CTeq(0, Bid::CTcmp(node->value, minnode->value));
         node->isDummy = HeapNode::conditional_select(true, node->isDummy, choice);
         node->index = HeapNode::conditional_select((unsigned long long) 0, node->index, choice);
     }
     evict(true);
     currentLeaf = RandomPath() / 2 + (maxOfRandom / 2);
+    std::cout << "currentLeaf: " << currentLeaf << std::endl;
     FetchPath(currentLeaf);
     evict(true);
+    std::cout << "Evicting Buckets" << std::endl;
     EvictBuckets();
+    std::cout << "End of Execute" << std::endl;
     delete minnode;
     delete rootnode;
     return res;
@@ -642,44 +669,7 @@ void DOHEAP::evict(bool evictBuckets) {
         counter = HeapNode::conditional_select(counter + 1, counter, !firstCond && fourthCond);
         level = HeapNode::conditional_select(level - 1, level, firstCond && !secondCond);
         i = HeapNode::conditional_select(i - 1, i, firstCond && !secondCond);
-        currentID = HeapNode::conditional_select(tmpcurrentID, currentID, firstCond&&!secondCond);
-
-        //        if (firstCond) {
-        //            if (secondCond) {
-        //                if (thirdCond) {
-        //                    long long tmpEvictionNode = GetNodeOnPath(currentLeaf, depth - (int) floor(counter / Z));
-        //                    curNode->evictionNode = -1;
-        //                    counter = counter;
-        //                    level = level;
-        //                    i = i;
-        //                } else {
-        //                    long long tmpEvictionNode = GetNodeOnPath(currentLeaf, depth - (int) floor(counter / Z));
-        //                    curNode->evictionNode = tmpEvictionNode;
-        //                    counter++;
-        //                    level = level;
-        //                    i = i;
-        //                }
-        //            } else {
-        //                currentID = GetNodeOnPath(currentLeaf, level - 1);
-        //                curNode->evictionNode = curNode->evictionNode;
-        //                counter = counter;
-        //                level--;
-        //                i--;
-        //            }
-        //
-        //        } else if (curNode->evictionNode == currentID) {
-        //            long long tmpID = GetNodeOnPath(currentLeaf, level - 1);
-        //            curNode->evictionNode = curNode->evictionNode;
-        //            counter++;
-        //            level = level;
-        //            i = i;
-        //        } else {
-        //            long long tmpID = GetNodeOnPath(currentLeaf, level - 1);
-        //            curNode->evictionNode = curNode->evictionNode;
-        //            counter = counter;
-        //            level = level;
-        //            i = i;
-        //        }
+        currentID = HeapNode::conditional_select(tmpcurrentID, currentID, firstCond && !secondCond);
     }
 
     if (beginProfile) {

@@ -960,6 +960,7 @@ AVLTree::AVLTree(long long maxSize, long long initialSize, Bid& rootKey, unsigne
     unsigned long long neededNumner = nextPower2 - initialSize;
     double h;
 
+    std::cout << "neededNumner: " << neededNumner << ", maxSize: " << maxSize << std::endl;
 
     ocall_start_timer(426);
     printf("Creating permutation\n");
@@ -993,7 +994,10 @@ AVLTree::AVLTree(long long maxSize, long long initialSize, Bid& rootKey, unsigne
         }
 
         if (min((int) (neededNumner - i * 10000), 10000) != 0) {
-            ocall_nwrite_rawRamStore(min((int) (neededNumner - i * 10000), 10000), indexes.data(), (const char*) tmp, storeSingleBlockSize * min((int) (neededNumner - i * 10000), 10000));
+            ocall_nwrite_rawRamStore(min((int)(neededNumner - i * 10000), 10000),
+                                     indexes.data(),
+                                     (const char *)tmp,
+                                     storeSingleBlockSize * min((int)(neededNumner - i * 10000), 10000));
         }
         delete tmp;
         indexes.clear();
@@ -1357,8 +1361,9 @@ void AVLTree::createPermutation(int maxSize) {
             prf.setValue(counter);
             indexes.push_back(counter);
             block buffer1(prf.id.begin(), prf.id.end());
-            block prfVal = AES_PRF(secretkey, buffer1, PRF_SIZE * 2, PRF_SIZE);
-            std::copy(prfVal.begin(), prfVal.end(), prf.id.begin());
+            // block prfVal = AES_PRF(secretkey, buffer1, PRF_SIZE * 2, PRF_SIZE);
+            // // std::cout << "prfVal.size(): " << prfVal.size() << ", prf.id.size(): " << prf.id.size() << std::endl;
+            // std::copy(prfVal.begin(), prfVal.begin() + PRF_SIZE, prf.id.begin());
             counter++;
             k++;
             prf.index = pos;

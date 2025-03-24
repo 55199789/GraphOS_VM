@@ -28,3 +28,4 @@ failure_prob
 *.raw
 meta-data
 *.log
+*.in

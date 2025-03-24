@@ -1,350 +1,11 @@
 #include "Enclave.h"
 #include <assert.h>
-#include "Enclave_t.h"
-#include "sgx_tkey_exchange.h"
-#include "sgx_tcrypto.h"
 #include "string.h"
 #include <algorithm>
 #include <math.h>
-#include "OMAP/OMAP.h"
-#include "OMAP/AES.hpp"
+#include "OMAP.h"
+#include "RAMStoreEnclaveInterface.h"
 #include "GraphNode.h"
-
-// This is the public EC key of the SP. The corresponding private EC key is
-// used by the SP to sign data used in the remote attestation SIGMA protocol
-// to sign channel binding data in MSG2. A successful verification of the
-// signature confirms the identity of the SP to the ISV app in remote
-// attestation secure channel binding. The public EC key should be hardcoded in
-// the enclave or delivered in a trustworthy manner. The use of a spoofed public
-// EC key in the remote attestation with secure channel binding session may lead
-// to a security compromise. Every different SP the enlcave communicates to
-// must have a unique SP public key. Delivery of the SP public key is
-// determined by the ISV. The TKE SIGMA protocl expects an Elliptical Curve key
-// based on NIST P-256
-static const sgx_ec256_public_t g_sp_pub_key = {
-    {
-        0x72, 0x12, 0x8a, 0x7a, 0x17, 0x52, 0x6e, 0xbf,
-        0x85, 0xd0, 0x3a, 0x62, 0x37, 0x30, 0xae, 0xad,
-        0x3e, 0x3d, 0xaa, 0xee, 0x9c, 0x60, 0x73, 0x1d,
-        0xb0, 0x5b, 0xe8, 0x62, 0x1c, 0x4b, 0xeb, 0x38
-    },
-    {
-        0xd4, 0x81, 0x40, 0xd9, 0x50, 0xe2, 0x57, 0x7b,
-        0x26, 0xee, 0xb7, 0x41, 0xe7, 0xc6, 0x14, 0xe2,
-        0x24, 0xb7, 0xbd, 0xc9, 0x03, 0xf2, 0x9a, 0x28,
-        0xa8, 0x3c, 0xc8, 0x10, 0x11, 0x14, 0x5e, 0x06
-    }
-
-};
-
-// Used to store the secret passed by the SP in the sample code. The
-// size is forced to be 8 bytes. Expected value is
-// 0x01,0x02,0x03,0x04,0x0x5,0x0x6,0x0x7
-uint8_t g_secret[8] = {0};
-
-
-#ifdef SUPPLIED_KEY_DERIVATION
-
-#pragma message ("Supplied key derivation function is used.")
-
-typedef struct _hash_buffer_t {
-    uint8_t counter[4];
-    sgx_ec256_dh_shared_t shared_secret;
-    uint8_t algorithm_id[4];
-} hash_buffer_t;
-
-const char ID_U[] = "SGXRAENCLAVE";
-const char ID_V[] = "SGXRASERVER";
-
-// Derive two keys from shared key and key id.
-
-bool derive_key(
-        const sgx_ec256_dh_shared_t *p_shared_key,
-        uint8_t key_id,
-        sgx_ec_key_128bit_t *first_derived_key,
-        sgx_ec_key_128bit_t *second_derived_key) {
-    sgx_status_t sgx_ret = SGX_SUCCESS;
-    hash_buffer_t hash_buffer;
-    sgx_sha_state_handle_t sha_context;
-    sgx_sha256_hash_t key_material;
-
-    memset(&hash_buffer, 0, sizeof (hash_buffer_t));
-    /* counter in big endian  */
-    hash_buffer.counter[3] = key_id;
-
-    /*convert from little endian to big endian */
-    for (size_t i = 0; i < sizeof (sgx_ec256_dh_shared_t); i++) {
-        hash_buffer.shared_secret.s[i] = p_shared_key->s[sizeof (p_shared_key->s) - 1 - i];
-    }
-
-    sgx_ret = sgx_sha256_init(&sha_context);
-    if (sgx_ret != SGX_SUCCESS) {
-        return false;
-    }
-    sgx_ret = sgx_sha256_update((uint8_t*) & hash_buffer, sizeof (hash_buffer_t), sha_context);
-    if (sgx_ret != SGX_SUCCESS) {
-        sgx_sha256_close(sha_context);
-        return false;
-    }
-    sgx_ret = sgx_sha256_update((uint8_t*) & ID_U, sizeof (ID_U), sha_context);
-    if (sgx_ret != SGX_SUCCESS) {
-        sgx_sha256_close(sha_context);
-        return false;
-    }
-    sgx_ret = sgx_sha256_update((uint8_t*) & ID_V, sizeof (ID_V), sha_context);
-    if (sgx_ret != SGX_SUCCESS) {
-        sgx_sha256_close(sha_context);
-        return false;
-    }
-    sgx_ret = sgx_sha256_get_hash(sha_context, &key_material);
-    if (sgx_ret != SGX_SUCCESS) {
-        sgx_sha256_close(sha_context);
-        return false;
-    }
-    sgx_ret = sgx_sha256_close(sha_context);
-
-    assert(sizeof (sgx_ec_key_128bit_t)* 2 == sizeof (sgx_sha256_hash_t));
-    memcpy(first_derived_key, &key_material, sizeof (sgx_ec_key_128bit_t));
-    memcpy(second_derived_key, (uint8_t*) & key_material + sizeof (sgx_ec_key_128bit_t), sizeof (sgx_ec_key_128bit_t));
-
-    // memset here can be optimized away by compiler, so please use memset_s on
-    // windows for production code and similar functions on other OSes.
-    memset(&key_material, 0, sizeof (sgx_sha256_hash_t));
-
-    return true;
-}
-
-//isv defined key derivation function id
-#define ISV_KDF_ID 2
-
-typedef enum _derive_key_type_t {
-    DERIVE_KEY_SMK_SK = 0,
-    DERIVE_KEY_MK_VK,
-} derive_key_type_t;
-
-sgx_status_t key_derivation(const sgx_ec256_dh_shared_t* shared_key,
-        uint16_t kdf_id,
-        sgx_ec_key_128bit_t* smk_key,
-        sgx_ec_key_128bit_t* sk_key,
-        sgx_ec_key_128bit_t* mk_key,
-        sgx_ec_key_128bit_t* vk_key) {
-    bool derive_ret = false;
-
-    if (NULL == shared_key) {
-        return SGX_ERROR_INVALID_PARAMETER;
-    }
-
-    if (ISV_KDF_ID != kdf_id) {
-        //fprintf(stderr, "\nError, key derivation id mismatch in [%s].", __FUNCTION__);
-        return SGX_ERROR_KDF_MISMATCH;
-    }
-
-    derive_ret = derive_key(shared_key, DERIVE_KEY_SMK_SK,
-            smk_key, sk_key);
-    if (derive_ret != true) {
-        //fprintf(stderr, "\nError, derive key fail in [%s].", __FUNCTION__);
-        return SGX_ERROR_UNEXPECTED;
-    }
-
-    derive_ret = derive_key(shared_key, DERIVE_KEY_MK_VK,
-            mk_key, vk_key);
-    if (derive_ret != true) {
-        //fprintf(stderr, "\nError, derive key fail in [%s].", __FUNCTION__);
-        return SGX_ERROR_UNEXPECTED;
-    }
-    return SGX_SUCCESS;
-}
-#else
-#pragma message ("Default key derivation function is used.")
-#endif
-
-// This ecall is a wrapper of sgx_ra_init to create the trusted
-// KE exchange key context needed for the remote attestation
-// SIGMA API's. Input pointers aren't checked since the trusted stubs
-// copy them into EPC memory.
-//
-// @param b_pse Indicates whether the ISV app is using the
-//              platform services.
-// @param p_context Pointer to the location where the returned
-//                  key context is to be copied.
-//
-// @return Any error return from the create PSE session if b_pse
-//         is true.
-// @return Any error returned from the trusted key exchange API
-//         for creating a key context.
-
-sgx_status_t enclave_init_ra(
-        int b_pse,
-        sgx_ra_context_t *p_context) {
-    // isv enclave call to trusted key exchange library.
-    sgx_status_t ret;
-    if (b_pse) {
-        int busy_retry_times = 2;
-        do {
-            ret = sgx_create_pse_session();
-        } while (ret == SGX_ERROR_BUSY && busy_retry_times--);
-        if (ret != SGX_SUCCESS)
-            return ret;
-    }
-#ifdef SUPPLIED_KEY_DERIVATION
-    ret = sgx_ra_init_ex(&g_sp_pub_key, b_pse, key_derivation, p_context);
-#else
-    ret = sgx_ra_init(&g_sp_pub_key, b_pse, p_context);
-#endif
-    if (b_pse) {
-        sgx_close_pse_session();
-        return ret;
-    }
-    return ret;
-}
-
-
-// Closes the tKE key context used during the SIGMA key
-// exchange.
-//
-// @param context The trusted KE library key context.
-//
-// @return Return value from the key context close API
-
-sgx_status_t SGXAPI enclave_ra_close(
-        sgx_ra_context_t context) {
-    sgx_status_t ret;
-    ret = sgx_ra_close(context);
-    return ret;
-}
-
-
-// Verify the mac sent in att_result_msg from the SP using the
-// MK key. Input pointers aren't checked since the trusted stubs
-// copy them into EPC memory.
-//
-//
-// @param context The trusted KE library key context.
-// @param p_message Pointer to the message used to produce MAC
-// @param message_size Size in bytes of the message.
-// @param p_mac Pointer to the MAC to compare to.
-// @param mac_size Size in bytes of the MAC
-//
-// @return SGX_ERROR_INVALID_PARAMETER - MAC size is incorrect.
-// @return Any error produced by tKE  API to get SK key.
-// @return Any error produced by the AESCMAC function.
-// @return SGX_ERROR_MAC_MISMATCH - MAC compare fails.
-
-sgx_status_t verify_att_result_mac(sgx_ra_context_t context,
-        uint8_t* p_message,
-        size_t message_size,
-        uint8_t* p_mac,
-        size_t mac_size) {
-    sgx_status_t ret;
-    sgx_ec_key_128bit_t mk_key;
-
-    if (mac_size != sizeof (sgx_mac_t)) {
-        ret = SGX_ERROR_INVALID_PARAMETER;
-        return ret;
-    }
-    if (message_size > UINT32_MAX) {
-        ret = SGX_ERROR_INVALID_PARAMETER;
-        return ret;
-    }
-
-    do {
-        uint8_t mac[SGX_CMAC_MAC_SIZE] = {0};
-
-        ret = sgx_ra_get_keys(context, SGX_RA_KEY_MK, &mk_key);
-        if (SGX_SUCCESS != ret) {
-            break;
-        }
-        ret = sgx_rijndael128_cmac_msg(&mk_key,
-                p_message,
-                (uint32_t) message_size,
-                &mac);
-        if (SGX_SUCCESS != ret) {
-            break;
-        }
-        if (0 == consttime_memequal(p_mac, mac, sizeof (mac))) {
-            ret = SGX_ERROR_MAC_MISMATCH;
-            break;
-        }
-
-    } while (0);
-
-    return ret;
-}
-
-
-// Generate a secret information for the SP encrypted with SK.
-// Input pointers aren't checked since the trusted stubs copy
-// them into EPC memory.
-//
-// @param context The trusted KE library key context.
-// @param p_secret Message containing the secret.
-// @param secret_size Size in bytes of the secret message.
-// @param p_gcm_mac The pointer the the AESGCM MAC for the
-//                 message.
-//
-// @return SGX_ERROR_INVALID_PARAMETER - secret size if
-//         incorrect.
-// @return Any error produced by tKE  API to get SK key.
-// @return Any error produced by the AESGCM function.
-// @return SGX_ERROR_UNEXPECTED - the secret doesn't match the
-//         expected value.
-
-sgx_status_t put_secret_data(
-        sgx_ra_context_t context,
-        uint8_t *p_secret,
-        uint32_t secret_size,
-        uint8_t *p_gcm_mac) {
-    sgx_status_t ret = SGX_SUCCESS;
-    sgx_ec_key_128bit_t sk_key;
-
-    do {
-        if (secret_size != 8) {
-            ret = SGX_ERROR_INVALID_PARAMETER;
-            break;
-        }
-
-        ret = sgx_ra_get_keys(context, SGX_RA_KEY_SK, &sk_key);
-        if (SGX_SUCCESS != ret) {
-            break;
-        }
-
-        uint8_t aes_gcm_iv[12] = {0};
-        ret = sgx_rijndael128GCM_decrypt(&sk_key,
-                p_secret,
-                secret_size,
-                &g_secret[0],
-                &aes_gcm_iv[0],
-                12,
-                NULL,
-                0,
-                (const sgx_aes_gcm_128bit_tag_t *)
-                (p_gcm_mac));
-
-        uint32_t i;
-        bool secret_match = true;
-        for (i = 0; i < secret_size; i++) {
-            if (g_secret[i] != i) {
-                secret_match = false;
-            }
-        }
-
-        if (!secret_match) {
-            ret = SGX_ERROR_UNEXPECTED;
-        }
-
-        // Once the server has the shared secret, it should be sealed to
-        // persistent storage for future use. This will prevents having to
-        // perform remote attestation until the secret goes stale. Once the
-        // enclave is created again, the secret can be unsealed.
-    } while (0);
-    return ret;
-}
-
-//int PLAINTEXT_LENGTH = sizeof (GraphNode);
-//int PLAINTEXT_LENGTH2 = sizeof (pair<int, int>);
-//int CIPHER_LENGTH = SGX_AESGCM_IV_SIZE + SGX_AESGCM_MAC_SIZE + PLAINTEXT_LENGTH;
-//int CIPHER_LENGTH2 = SGX_AESGCM_IV_SIZE + SGX_AESGCM_MAC_SIZE + PLAINTEXT_LENGTH2;
-
 
 #define MY_MAX 9999999
 #define KV_MAX_SIZE 8192
@@ -480,43 +141,259 @@ bool CTeq(string a, string b) {
     return res;
 }
 
+void addKeyValuePair(string key, string value)
+{
+    if (key != "")
+    {
+        string omapKey = key;
+        std::array<uint8_t, ID_SIZE> keyArray;
+        keyArray.fill(0);
+        std::copy(omapKey.begin(), omapKey.end(), std::begin(keyArray));
+        std::array<byte_t, ID_SIZE> id;
+        std::memcpy(id.data(), (const char *)keyArray.data(), ID_SIZE);
+        Bid inputBid(id);
+        finalPairs[inputBid] = value;
+    }
+    if (finalPairs.size() == KV_MAX_SIZE || ((key == "") && (value == "")))
+    {
+        char *tmp = new char[finalPairs.size() * storeSingleBlockSize];
+        vector<long long> indexes;
+        long long j = 0;
+        for (auto pair : finalPairs)
+        {
+            Node *node = new Node();
+            node->key = pair.first;
+            node->index = 0;
+            std::fill(node->value.begin(), node->value.end(), 0);
+            std::copy(pair.second.begin(), pair.second.end(), node->value.begin());
+            node->leftID = 0;
+            node->leftPos = -1;
+            node->rightPos = -1;
+            node->rightID = 0;
+            node->pos = 0;
+            node->isDummy = false;
+            node->height = 1; // new node is initially added at leaf
+
+            indexes.push_back(KV_index);
+            KV_index++;
+
+            std::array<byte_t, sizeof(Node)> data;
+
+            const byte_t *begin = reinterpret_cast<const byte_t *>(std::addressof(((*node))));
+            const byte_t *end = begin + sizeof(Node);
+            std::copy(begin, end, std::begin(data));
+
+            block buffer(data.begin(), data.end());
+            std::memcpy(tmp + j * buffer.size(), buffer.data(), storeSingleBlockSize);
+            delete node;
+            j++;
+        }
+        ocall_nwrite_rawRamStore_for_graph(finalPairs.size(), indexes.data(), (const char *)tmp, storeSingleBlockSize * finalPairs.size());
+        delete tmp;
+        finalPairs.clear();
+    }
+}
+
+void ecall_pad_nodes(char **edgeList)
+{
+    int maxPad = (int)pow(2, ceil(log2(edgeNumber)));
+
+    for (int i = edgeNumber; i < maxPad; i++)
+    {
+        GraphNode *node = new GraphNode();
+        node->src_id = -1;
+        node->dst_id = -1;
+        node->weight = MY_MAX;
+
+        block b = GraphNode::convertNodeToBlock(node);
+        memcpy((uint8_t *)(*edgeList) + i * b.size(), b.data(), b.size());
+        delete node;
+    }
+}
+
+void ecall_setup_with_small_memory(int eSize, long long vSize, char **edgeList, int op = -1)
+{
+    size_t depth = (int)(ceil(log2(vSize)) - 1) + 1;
+    long long maxOfRandom = (long long)(pow(2, depth));
+    vertexNumber = vSize;
+    edgeNumber = eSize;
+    maximumPad = (int)pow(2, ceil(log2(edgeNumber)));
+    long long KVNumber = 0;
+
+    OMAP *omap = new OMAP(maxOfRandom, vSize);
+
+    unsigned long long maxSize = (vertexNumber + edgeNumber) * 4;
+    depth = (int)(ceil(log2(maxSize)) - 1) + 1;
+    maxOfRandom = (long long)(pow(2, depth));
+    unsigned long long bucketCount = maxOfRandom * 2 - 1;
+    unsigned long long blockSize = sizeof(Node); // B
+    unsigned long long blockCount = (size_t)(Z * bucketCount);
+    ocall_finish_setup();
+    ocall_setup_ramStore(blockCount, blockSize);
+    ocall_begin_setup();
+
+    for (int i = 0; i < eSize; i++)
+    {
+        if (i % 100 == 0)
+            printf("%d/%d of edges processed\n", i, eSize);
+        block buffer((*edgeList) + i * edgeStoreSingleBlockSize,
+                     (*edgeList) + (i + 1) * edgeStoreSingleBlockSize);
+        GraphNode *curEdge = GraphNode::convertBlockToNode(buffer);
+
+        string srcBid = "?" + to_string(curEdge->src_id);
+        std::array<byte_t, ID_SIZE> srcid;
+        std::memcpy(srcid.data(), srcBid.data(), ID_SIZE);
+        Bid srcInputBid(srcid);
+        string srcCntStr = omap->incPart(srcInputBid, true);
+
+        vector<string> parts = splitData(srcCntStr, "-");
+        int outSrc = std::stoi(parts[0]) + 1;
+        int inSrc = std::stoi(parts[1]);
+
+        string dstBid = "?" + to_string(curEdge->dst_id);
+        std::array<byte_t, ID_SIZE> dstid;
+        std::memcpy(dstid.data(), dstBid.data(), ID_SIZE);
+        Bid dstInputBid(dstid);
+        string dstCntStr = omap->incPart(dstInputBid, false);
+
+        parts = splitData(dstCntStr, "-");
+        int outDst = std::stoi(parts[0]);
+        int inDst = std::stoi(parts[1]) + 1;
+
+        string src = to_string(curEdge->src_id);
+        string dst = to_string(curEdge->dst_id);
+        string weight = to_string(curEdge->weight);
+
+        addKeyValuePair("$" + src + "-" + to_string(outSrc), dst + "-" + weight);
+        addKeyValuePair("*" + dst + "-" + to_string(inDst), src + "-" + weight);
+        addKeyValuePair("!" + src + "-" + dst, weight + "-" + to_string(outSrc) + "-" + to_string(inDst));
+        KVNumber += 3;
+
+        // SSSP SETUP
+        if (op == 3)
+        {
+            addKeyValuePair("&" + to_string(i), "0-0");
+            KVNumber++;
+        }
+
+        delete curEdge;
+    }
+
+    for (int i = 1; i <= vSize; i++)
+    {
+        if (i % 100 == 0)
+        {
+            printf("%d/%d of vertices processed\n", i, (int)vSize);
+        }
+        string bid = "?" + to_string(i);
+        std::array<byte_t, ID_SIZE> id;
+        std::memcpy(id.data(), bid.data(), ID_SIZE);
+        Bid inputBid(id);
+        string value = omap->find(inputBid);
+        addKeyValuePair(bid, value);
+        KVNumber++;
+
+        // SSSP SETUP
+        if (op == 1)
+        {
+            bid = "@" + to_string(i);
+            value = "";
+            addKeyValuePair(bid, value);
+            KVNumber++;
+            bid = "%" + to_string(i);
+            value = "";
+            addKeyValuePair(bid, value);
+            KVNumber++;
+        }
+        else if (op == 2)
+        {
+            bid = "/" + to_string(i);
+            value = to_string(i);
+            addKeyValuePair(bid, value);
+            KVNumber++;
+        }
+        else if (op == 3)
+        {
+            bid = "/" + to_string(i);
+            value = to_string(MY_MAX);
+            addKeyValuePair(bid, value);
+            KVNumber++;
+        }
+    }
+
+    if (op == 1)
+    {
+        string bid = "@" + to_string(0);
+        string value = "";
+        addKeyValuePair(bid, value);
+        KVNumber++;
+        bid = "%" + to_string(0);
+        value = "";
+        addKeyValuePair(bid, value);
+        KVNumber++;
+    }
+    else if (op == 2 || op == 3)
+    {
+        string bid = "/" + to_string(0);
+        string value = to_string(0);
+        addKeyValuePair(bid, value);
+        KVNumber++;
+    }
+    addKeyValuePair("", "");
+    ecall_pad_nodes(edgeList);
+
+    ocall_finish_setup();
+    ecall_setup_omap_with_small_memory((vertexNumber + edgeNumber) * 4, KVNumber);
+}
+
 //SSSP with oblivm version min heap
 
 void ecall_oblivm_single_source_shortest_path(int src) {
     ecall_setup_oheap(edgeNumber);
 
+    std::cout << "set up oheap" << std::endl;
+
     ocall_start_timer(34);
     for (int i = 1; i <= vertexNumber; i++) {
+        std::cout << "init dist of " << i << std::endl;
         writeOMAP("/" + to_string(i), to_string(MY_MAX));
     }
 
     writeOMAP("/" + to_string(src), "0");
+    std::cout << "readWriteOMAP" << std::endl;
     ecall_set_new_minheap_node(src - 1, 0);
+    std::cout << "Start with source node " << src << std::endl;
 
     bool innerloop = false;
     string dstStr, omapKey;
     int u = -1, cnt = 1, distu = -1, curDistU = -1;
 
     for (int i = 0; i < (2 * vertexNumber + edgeNumber); i++) {
-        if (i % 10 == 0) {
-            printf("%d/%d\n", i, vertexNumber + edgeNumber);
-        }
-        if (innerloop == false) {
+        if (i % 1 == 0)
+            printf("sssp: %d/%d\n", i, vertexNumber + edgeNumber);
+
+        if (innerloop == false)
+        {
             u = -1;
             distu = -1;
             ecall_extract_min_id(&u, &distu);
-            if (u == -1) {
+            std::cout << "u: " << u << ", distu: " << distu << std::endl;
+            if (u == -1)
+            {
                 u = u;
                 curDistU = -2;
-            } else {
+            }
+            else
+            {
                 u++;
                 string readData = readOMAP("/" + to_string(u));
-                curDistU = stoi(readData);
+                curDistU = std::stoi(readData);
             }
 
             if (curDistU == distu) {
                 cnt = 1;
                 omapKey = "$" + to_string(u) + "-" + to_string(cnt);
+                std::cout << "omapKey: " << omapKey << std::endl;
                 dstStr = readOMAP(omapKey);
                 if (dstStr != "") {
                     innerloop = true;
@@ -527,12 +404,14 @@ void ecall_oblivm_single_source_shortest_path(int src) {
                 writeOMAP("/-", "");
             }
             writeOMAP("/-", "");
-        } else {
+        }
+        else
+        {
             auto parts = splitData(dstStr, "-");
-            int v = stoi(parts[0]);
-            int weight = stoi(parts[1]);
+            int v = std::stoi(parts[0]);
+            int weight = std::stoi(parts[1]);
             int distU = curDistU;
-            int distV = stoi(readOMAP("/" + to_string(v)));
+            int distV = std::stoi(readOMAP("/" + to_string(v)));
 
             if (weight + distU < distV) {
                 writeOMAP("/" + to_string(v), to_string(distU + weight));
@@ -560,12 +439,13 @@ void ecall_oblivm_single_source_shortest_path(int src) {
 
 void ecall_oblivious_oblivm_single_source_shortest_path(int src) {
     ecall_setup_oheap(edgeNumber);
-
+    std::cout << "Setup oheap with " << edgeNumber << " edges" << std::endl;
     ocall_start_timer(34);
 
-
     readWriteOMAP("/" + to_string(src), "0");
+    std::cout << "readWriteOMAP" << std::endl;
     ecall_set_new_minheap_node(src - 1, 0);
+    std::cout << "Start with source node " << src << std::endl;
 
     bool innerloop = false;
     string dstStr, omapKey;
@@ -573,29 +453,35 @@ void ecall_oblivious_oblivm_single_source_shortest_path(int src) {
     string mapKey = "", mapValue = "", tmp = "";
 
     for (int i = 0; i < (2 * vertexNumber + edgeNumber); i++) {
-        if (i % 10 == 0) {
-            printf("%d/%d\n", i, 2 * vertexNumber + edgeNumber);
+        if (i % 1 == 0)
+        {
+            printf("odij: %d/%d\n", i, 2 * vertexNumber + edgeNumber);
         }
         bool check = Node::CTeq(dstStr.length(), 0) && !innerloop;
         dstStr = CTString("0-0", dstStr, check);
         auto parts = splitData(dstStr, "-");
-        v = Node::conditional_select(stoi(parts[0]), v, innerloop);
-        //        v = innerloop ? stoi(parts[0]) : v;
-        weight = Node::conditional_select(stoi(parts[1]), weight, innerloop);
-        //        weight = innerloop ? stoi(parts[1]) : weight;       //TODO
+        std::cout << "parts: " << parts[0] << ", " << parts[1] << std::endl;
+        v = Node::conditional_select(std::stoi(parts[0]), v, innerloop);
+        //        v = innerloop ? std::stoi(parts[0]) : v;
+        weight = Node::conditional_select(std::stoi(parts[1]), weight, innerloop);
+        //        weight = innerloop ? std::stoi(parts[1]) : weight;       //TODO
         distu = Node::conditional_select(curDistU, -1, innerloop);
         //        distu = innerloop ? curDistU : -1;
+        std::cout << "v: " << v << ", weight: " << weight << ", distu: " << distu << std::endl;
 
         mapKey = CTString(to_string(v), "0", innerloop);
         //        mapKey = innerloop ? to_string(v) : "-";
         u = Node::conditional_select(u, -1, innerloop);
         //        u = innerloop ? u : -1;
+        std::cout << "mapKey: " << mapKey << ", u: " << u << std::endl;
         tmp = readOMAP("/" + to_string(v));
+        std::cout << "tmp: " << tmp << std::endl;
 
         check = Node::CTeq(tmp.length(), 0) && !innerloop;
         tmp = CTString("0-0", tmp, check);
-        distv = Node::conditional_select(stoi(tmp), distv, innerloop);
-        //        distv = innerloop ? stoi(tmp) : distv;
+        std::cout << "tmp: " << tmp << ", std::stoi(tmp): " << std::stoi(tmp) << std::endl;
+        distv = Node::conditional_select(std::stoi(tmp), distv, innerloop);
+        //        distv = innerloop ? std::stoi(tmp) : distv;
         mapValue = CTString(to_string(distu + weight), to_string(distv), innerloop && Node::CTeq(Node::CTcmp(distu + weight, distv), -1));
         //        mapValue = (innerloop && (distu + weight < distv)) ? to_string(distu + weight) : to_string(distv);
         readWriteOMAP("/" + mapKey, mapValue);
@@ -630,8 +516,8 @@ void ecall_oblivious_oblivm_single_source_shortest_path(int src) {
 
         check = Node::CTeq(tmp.length(), 0) && (innerloop || Node::CTeq(u, -1));
         tmp = CTString("0-0", tmp, check);
-        curDistU = Node::conditional_select(stoi(tmp), curDistU, !innerloop && !Node::CTeq(u, -1));
-        //        curDistU = ((innerloop == false) && u != -1) ? stoi(tmp) : curDistU;
+        curDistU = Node::conditional_select(std::stoi(tmp), curDistU, !innerloop && !Node::CTeq(u, -1));
+        //        curDistU = ((innerloop == false) && u != -1) ? std::stoi(tmp) : curDistU;
         curDistU = Node::conditional_select(-2, curDistU, !innerloop && Node::CTeq(u, -1));
         //        curDistU = ((innerloop == false) && u == -1) ? -2 : curDistU;
         cnt = Node::conditional_select(1, cnt, !innerloop && Node::CTeq(curDistU, distu));

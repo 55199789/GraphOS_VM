@@ -65,13 +65,13 @@ Bid& Bid::operator=(Bid const &other) {
 long long Bid::getValue() {
     long long result = 0;
     result += id[0];
-    result += (id[1] << 8);
-    result += (id[2] << 16);
-    result += (id[3] << 24);
-    result += (id[4] << 24);
-    result += (id[5] << 32);
-    result += (id[6] << 40);
-    result += (id[7] << 48);
+    result += ((long long)id[1] << 8);
+    result += ((long long)id[2] << 16);
+    result += ((long long)id[3] << 24);
+    result += ((long long)id[4] << 24);
+    result += ((long long)id[5] << 32);
+    result += ((long long)id[6] << 40);
+    result += ((long long)id[7] << 48);
     return result;
 }
 

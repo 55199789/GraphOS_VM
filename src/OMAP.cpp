@@ -4,20 +4,24 @@ using namespace std;
 OMAP::OMAP(int maxSize, bool isEmptyOMAP) {
     treeHandler = new AVLTree(maxSize, isEmptyOMAP);
     rootKey = 0;
+    std::cout << "init 1, rootKey: " << rootKey.getValue() << std::endl;
 }
 
 OMAP::OMAP(int maxSize, map<Bid, string>* pairs, map<unsigned long long, unsigned long long>* permutation) {
     treeHandler = new AVLTree(maxSize, rootKey, rootPos, pairs, permutation);
+    std::cout << "init 2, rootKey: " << rootKey.getValue() << std::endl;
 }
 
 OMAP::OMAP(int maxSize, Bid rootBid, long long rootPos) {
     treeHandler = new AVLTree(maxSize, false);
     this->rootKey = rootBid;
     this->rootPos = rootPos;
+    std::cout << "init 3, rootKey: " << rootKey.getValue() << std::endl;
 }
 
 OMAP::OMAP(int maxSize, long long initialSize) {
     treeHandler = new AVLTree(maxSize, initialSize, this->rootKey, this->rootPos);
+    std::cout << "init 4, rootKey: " << rootKey.getValue() << ", rootPos: " << this->rootPos << std::endl;
 }
 
 OMAP::~OMAP() {
@@ -43,11 +47,13 @@ void OMAP::insert(Bid omapKey, string value) {
     treeHandler->totheight = 0;
     int height;
     treeHandler->startOperation(false);
+    std::cout << "rootKey: " << rootKey.getValue() << std::endl;
     if (rootKey == 0) {
         rootKey = treeHandler->insert(0, rootPos, omapKey, value, height, omapKey, false);
     } else {
         rootKey = treeHandler->insert(rootKey, rootPos, omapKey, value, height, omapKey, false);
     }
+    std::cout << "rootKey: " << rootKey.getValue() << std::endl;
     treeHandler->finishOperation();
 }
 

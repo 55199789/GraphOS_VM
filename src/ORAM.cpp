@@ -1416,7 +1416,7 @@ ORAM::ORAM(long long maxSize, int nodesSize) : gen(rd()) {
     PERMANENT_STASH_SIZE = 90;
     stash.preAllocate(PERMANENT_STASH_SIZE * 4);
     printf("Number of leaves:%lld\n", maxOfRandom);
-    printf("depth:%lld\n", depth);
+    printf("depth:%d\n", depth);
 
     nextDummyCounter = INF;
     blockSize = sizeof (Node); // B  

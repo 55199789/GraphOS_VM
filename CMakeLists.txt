@@ -35,11 +35,13 @@ endif()
 
 include_directories(include)
 
+find_package(OpenSSL REQUIRED)
+
 file(GLOB LIB_SOURCES "src/*.cpp")
 add_library(GraphOSLib ${LIB_SOURCES})
 target_link_libraries(GraphOSLib
-  crypto
-  common)
+  ${OPENSSL_LIBRARIES})
+
 
 file(GLOB EXE_SOURCES "app/*.cpp")
 add_executable(GraphOS ${EXE_SOURCES})
